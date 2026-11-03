@@ -764,6 +764,14 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0 && src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
             return src_ss[0];
         }
+        // A mirrored table read with split row indices: each device gathers its own rows, so the result is split
+        // along its rows (axis 1) as the indices are along theirs. Selects each device's slice of a mirrored
+        // activation (e.g. its attention heads) without moving data between devices.
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED && src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_0) {
+            ggml_backend_meta_split_state ret = src_ss[1];
+            ret.axis = GGML_BACKEND_SPLIT_AXIS_1;
+            return ret;
+        }
         return handle_generic(src_ss, /*scalar_only =*/ true);
     };
 
@@ -915,7 +923,16 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_SUM: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
             } break;
-            case GGML_OP_SUM_ROWS:
+            case GGML_OP_SUM_ROWS: {
+                // Summing along a split axis 0: each device holds part of every row's sum (PARTIAL, all-reduced
+                // where it is consumed), as a mul_mat over a split K. Lets a norm over a split hidden size be built
+                // from sqr + sum_rows (full-width Q/K RMSNorm in video DiTs under head split).
+                if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
+                    split_state = {assume_sync ? GGML_BACKEND_SPLIT_AXIS_MIRRORED : GGML_BACKEND_SPLIT_AXIS_PARTIAL, {0}, {1}, 1};
+                } else {
+                    split_state = handle_per_row(src_ss);
+                }
+            } break;
             case GGML_OP_CUMSUM:
             case GGML_OP_MEAN:
             case GGML_OP_ARGMAX:
