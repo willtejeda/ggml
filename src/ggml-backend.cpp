@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -378,11 +379,62 @@ const char * ggml_backend_name(ggml_backend_t backend) {
     return backend->iface.get_name(backend);
 }
 
+// Extension plans made by ggml_backend_graph_compute_async. Freeing a plan synchronizes its backend (the queued
+// kernels may still use the plan's state), so freeing it right after the launch made every "async" launch wait for
+// the GPU: a meta backend's cards then ran one after the other. A plan now stays alive until its backend is
+// synchronized or freed.
+namespace {
+    struct ggml_backend_pending_plans {
+        std::mutex mutex;
+        std::unordered_map<ggml_backend_t, std::vector<ggml_ext_plan *>> plans;
+    };
+
+    ggml_backend_pending_plans & ggml_backend_pending_plans_get() {
+        static ggml_backend_pending_plans pending;
+        return pending;
+    }
+
+    // Plans kept per backend before the oldest are freed anyway (each free waits for the backend).
+    constexpr size_t GGML_BACKEND_MAX_PENDING_PLANS = 4096;
+
+    void ggml_backend_free_pending_plans(ggml_backend_t backend) {
+        std::vector<ggml_ext_plan *> plans;
+        {
+            auto & pending = ggml_backend_pending_plans_get();
+            std::lock_guard<std::mutex> lock(pending.mutex);
+            auto it = pending.plans.find(backend);
+            if (it == pending.plans.end()) {
+                return;
+            }
+            plans = std::move(it->second);
+            pending.plans.erase(it);
+        }
+        for (ggml_ext_plan * plan : plans) {
+            ggml_ext_plan_free(plan);
+        }
+    }
+
+    void ggml_backend_defer_plan_free(ggml_backend_t backend, ggml_ext_plan * plan) {
+        bool full = false;
+        {
+            auto & pending = ggml_backend_pending_plans_get();
+            std::lock_guard<std::mutex> lock(pending.mutex);
+            auto & plans = pending.plans[backend];
+            plans.push_back(plan);
+            full = plans.size() >= GGML_BACKEND_MAX_PENDING_PLANS;
+        }
+        if (full) {
+            ggml_backend_free_pending_plans(backend);
+        }
+    }
+}
+
 void ggml_backend_free(ggml_backend_t backend) {
     if (backend == NULL) {
         return;
     }
 
+    ggml_backend_free_pending_plans(backend);
     ggml_ext_backend_free(backend);
     backend->iface.free(backend);
 }
@@ -567,10 +619,12 @@ void ggml_backend_tensor_memset(struct ggml_tensor * tensor, uint8_t value, size
 void ggml_backend_synchronize(ggml_backend_t backend) {
     GGML_ASSERT(backend);
     if (backend->iface.synchronize == NULL) {
+        ggml_backend_free_pending_plans(backend);  // a backend without async work: nothing to wait for
         return;
     }
 
     backend->iface.synchronize(backend);
+    ggml_backend_free_pending_plans(backend);  // the backend is idle: their frees no longer wait
 }
 
 ggml_backend_graph_plan_t ggml_backend_graph_plan_create(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
@@ -605,7 +659,7 @@ enum ggml_status ggml_backend_graph_compute_async(ggml_backend_t backend, struct
     ggml_ext_plan * plan = ggml_ext_plan_create(backend, cgraph, nullptr, false);
     if (plan) {
         enum ggml_status status = ggml_ext_plan_compute(plan, cgraph);
-        ggml_ext_plan_free(plan);
+        ggml_backend_defer_plan_free(backend, plan);  // freed at the next synchronize: keeps this launch async
         return status;
     }
     return backend->iface.graph_compute(backend, cgraph);
