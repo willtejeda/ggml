@@ -434,6 +434,17 @@ extern "C" {
     GGML_API ggml_backend_dev_t ggml_backend_meta_device(
         ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud);
 
+    // Sequence parallelism on a meta backend: a tensor split along its outermost non-singleton axis (e.g. the tokens of
+    // an activation [features, tokens]) made whole on every device. The meta backend ends the sub-graph at this node and
+    // copies each device's slice to the others. Elsewhere it is a plain ggml_cont.
+    GGML_API struct ggml_tensor * ggml_backend_meta_all_gather(struct ggml_context * ctx, struct ggml_tensor * a);
+
+    // Declare a custom (GGML_OP_CUSTOM) operator row-local: each output row along the outermost axis depends only on the
+    // same rows of the inputs. On a meta backend such an op then runs on split inputs, every split input split along its
+    // own outermost axis in proportion, every mirrored input broadcast along it. `op` is the custom op's userdata
+    // (ggml_ext_op_t for ggml-ext operators).
+    GGML_API void ggml_backend_meta_register_row_local_op(const void * op);
+
     //
     // Utils
     //
