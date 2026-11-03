@@ -82,7 +82,7 @@ struct ggml_backend_meta_device_context {
     }
 };
 
-static bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev);
+bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev);
 
 static const char * ggml_backend_meta_device_get_name(ggml_backend_dev_t dev) {
     GGML_ASSERT(ggml_backend_dev_is_meta(dev));
@@ -195,7 +195,7 @@ static const ggml_backend_device_i ggml_backend_meta_device_iface = {
     /* .event_synchronize    = */ nullptr,
 };
 
-static bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev) {
+bool ggml_backend_dev_is_meta(ggml_backend_dev_t dev) {
     return dev != nullptr && dev->iface.get_name == ggml_backend_meta_device_iface.get_name;
 }
 
@@ -214,6 +214,19 @@ static ggml_backend_dev_t ggml_backend_meta_dev_simple_dev(ggml_backend_dev_t me
 
 ggml_backend_dev_t ggml_backend_meta_device(
         ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud) {
+    // A registry of its own, so code that looks up backend extras through a device's registry
+    // (ggml_backend_reg_get_proc_address) gets "not available" for a meta device instead of a null registry.
+    // It lists no devices: meta devices are made by ggml_backend_meta_device(), not enumerated.
+    static struct ggml_backend_reg meta_reg = {
+        /*api_version =*/ GGML_BACKEND_API_VERSION,
+        /*iface       =*/ {
+            /*get_name         =*/ [](ggml_backend_reg_t) -> const char * { return "Meta"; },
+            /*get_device_count =*/ [](ggml_backend_reg_t) -> size_t { return 0; },
+            /*get_device       =*/ [](ggml_backend_reg_t, size_t) -> ggml_backend_dev_t { return nullptr; },
+            /*get_proc_address =*/ [](ggml_backend_reg_t, const char *) -> void * { return nullptr; },
+        },
+        /*context     =*/ nullptr,
+    };
     GGML_ASSERT(n_devs <= GGML_BACKEND_META_MAX_DEVICES);
     // TODO: this is not thread-safe - needs to be fixed
     static std::vector<std::unique_ptr<ggml_backend_meta_device_context>>         ctxs;
@@ -236,7 +249,7 @@ ggml_backend_dev_t ggml_backend_meta_device(
 
     struct ggml_backend_device meta_dev = {
         /*iface  =*/ ggml_backend_meta_device_iface,
-        /*reg    =*/ nullptr,
+        /*reg    =*/ &meta_reg,
         /*ctx    =*/ ctxs.back().get(),
     };
 

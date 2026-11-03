@@ -777,7 +777,9 @@ bool ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_t
     if (ggml_ext_dev_supports_op(device, op)) {
         return true;
     }
-    if (ggml_ext_op_get(op)) {
+    // A meta device has no extension kernels of its own: it runs an extension op on its simple devices, so its
+    // supports_op (all simple devices support the op) decides.
+    if (ggml_ext_op_get(op) && !ggml_backend_dev_is_meta(device)) {
         return false;
     }
     return device->iface.supports_op(device, op);
