@@ -380,9 +380,9 @@ const char * ggml_backend_name(ggml_backend_t backend) {
 }
 
 // Extension plans made by ggml_backend_graph_compute_async. Freeing a plan synchronizes its backend (the queued
-// kernels may still use the plan's state), so freeing it right after the launch made every "async" launch wait for
-// the GPU: a meta backend's cards then ran one after the other. A plan now stays alive until its backend is
-// synchronized or freed.
+// kernels may still use the plan's state and workspace), so freeing it right after the launch made every "async"
+// launch wait for the GPU: a meta backend's cards then ran one after the other. A plan now stays alive until its
+// backend's next launch, synchronize or free (at most one per backend: its workspace is activation-sized).
 namespace {
     struct ggml_backend_pending_plans {
         std::mutex mutex;
@@ -656,10 +656,14 @@ enum ggml_status ggml_backend_graph_compute(ggml_backend_t backend, struct ggml_
 
 enum ggml_status ggml_backend_graph_compute_async(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     GGML_ASSERT(backend);
+    // The previous launch's plan on this backend is freed first: that waits only for this backend's own earlier
+    // work (a meta backend's other cards keep running), and bounds the plans, whose workspaces are as large as
+    // the activations, to one per backend.
+    ggml_backend_free_pending_plans(backend);
     ggml_ext_plan * plan = ggml_ext_plan_create(backend, cgraph, nullptr, false);
     if (plan) {
         enum ggml_status status = ggml_ext_plan_compute(plan, cgraph);
-        ggml_backend_defer_plan_free(backend, plan);  // freed at the next synchronize: keeps this launch async
+        ggml_backend_defer_plan_free(backend, plan);  // freed at this backend's next launch or synchronize
         return status;
     }
     return backend->iface.graph_compute(backend, cgraph);

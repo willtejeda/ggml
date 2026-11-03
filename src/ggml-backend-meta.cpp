@@ -212,6 +212,48 @@ static ggml_backend_dev_t ggml_backend_meta_dev_simple_dev(ggml_backend_dev_t me
     return meta_dev_ctx->simple_devs[index];
 }
 
+// Backend extras that act per backend (fn(backend, ...)) and are forwarded to the simple backends, so a meta backend
+// honours them: the reusable-buffer cache of the CUDA backend (freed buffers parked per device and cleared on
+// request). Without forwarding, a caller that clears it through the meta backend leaves them parked.
+size_t         ggml_backend_meta_n_backends(ggml_backend_t meta_backend);
+ggml_backend_t ggml_backend_meta_simple_backend(ggml_backend_t meta_backend, size_t index);
+
+static void * ggml_backend_meta_simple_proc(ggml_backend_t simple, const char * name) {
+    ggml_backend_dev_t dev = ggml_backend_get_device(simple);
+    ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+    return reg ? ggml_backend_reg_get_proc_address(reg, name) : nullptr;
+}
+
+static void ggml_backend_meta_set_buffer_cache_enabled(ggml_backend_t backend, bool enabled) {
+    for (size_t i = 0; i < ggml_backend_meta_n_backends(backend); i++) {
+        ggml_backend_t simple = ggml_backend_meta_simple_backend(backend, i);
+        auto fn = (void (*)(ggml_backend_t, bool)) ggml_backend_meta_simple_proc(simple, "ggml_backend_set_buffer_cache_enabled");
+        if (fn) {
+            fn(simple, enabled);
+        }
+    }
+}
+
+static void ggml_backend_meta_clear_buffer_cache(ggml_backend_t backend) {
+    for (size_t i = 0; i < ggml_backend_meta_n_backends(backend); i++) {
+        ggml_backend_t simple = ggml_backend_meta_simple_backend(backend, i);
+        auto fn = (void (*)(ggml_backend_t)) ggml_backend_meta_simple_proc(simple, "ggml_backend_clear_buffer_cache");
+        if (fn) {
+            fn(simple);
+        }
+    }
+}
+
+static void * ggml_backend_meta_forwarded_proc(const char * name) {
+    if (strcmp(name, "ggml_backend_set_buffer_cache_enabled") == 0) {
+        return (void *) ggml_backend_meta_set_buffer_cache_enabled;
+    }
+    if (strcmp(name, "ggml_backend_clear_buffer_cache") == 0) {
+        return (void *) ggml_backend_meta_clear_buffer_cache;
+    }
+    return nullptr;
+}
+
 ggml_backend_dev_t ggml_backend_meta_device(
         ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud) {
     // A registry of its own, so code that looks up backend extras through a device's registry
@@ -223,7 +265,9 @@ ggml_backend_dev_t ggml_backend_meta_device(
             /*get_name         =*/ [](ggml_backend_reg_t) -> const char * { return "Meta"; },
             /*get_device_count =*/ [](ggml_backend_reg_t) -> size_t { return 0; },
             /*get_device       =*/ [](ggml_backend_reg_t, size_t) -> ggml_backend_dev_t { return nullptr; },
-            /*get_proc_address =*/ [](ggml_backend_reg_t, const char *) -> void * { return nullptr; },
+            /*get_proc_address =*/ [](ggml_backend_reg_t, const char * name) -> void * {
+                return ggml_backend_meta_forwarded_proc(name);
+            },
         },
         /*context     =*/ nullptr,
     };
