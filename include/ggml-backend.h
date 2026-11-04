@@ -439,11 +439,12 @@ extern "C" {
     // copies each device's slice to the others. Elsewhere it is a plain ggml_cont.
     GGML_API struct ggml_tensor * ggml_backend_meta_all_gather(struct ggml_context * ctx, struct ggml_tensor * a);
 
-    // Declare a custom (GGML_OP_CUSTOM) operator row-local: each output row along the outermost axis depends only on the
-    // same rows of the inputs. On a meta backend such an op then runs on split inputs, every split input split along its
-    // own outermost axis in proportion, every mirrored input broadcast along it. `op` is the custom op's userdata
-    // (ggml_ext_op_t for ggml-ext operators).
-    GGML_API void ggml_backend_meta_register_row_local_op(const void * op);
+    // Declare a custom (GGML_OP_CUSTOM) operator row-local: each output row along one axis (the "rows", e.g. tokens)
+    // depends only on the same rows of the inputs. On a meta backend such an op then runs on split inputs, every split
+    // input split along its own outermost axis in proportion, every mirrored input broadcast along it. `op` is the
+    // custom op's userdata (ggml_ext_op_t for ggml-ext operators); `out_axis` is the output's row axis, or -1 for its
+    // outermost non-singleton axis (an op that keeps the input layout).
+    GGML_API void ggml_backend_meta_register_row_local_op(const void * op, int out_axis);
 
     //
     // Utils

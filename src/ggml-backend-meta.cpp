@@ -43,24 +43,34 @@ static std::mutex & ggml_backend_meta_row_local_mutex() {
     return mutex;
 }
 
-static std::set<const void *> & ggml_backend_meta_row_local_ops() {
-    static std::set<const void *> ops;
+// row-local custom op -> its output's row axis (-1: outermost non-singleton)
+static std::map<const void *, int> & ggml_backend_meta_row_local_ops() {
+    static std::map<const void *, int> ops;
     return ops;
 }
 
-void ggml_backend_meta_register_row_local_op(const void * op) {
+void ggml_backend_meta_register_row_local_op(const void * op, int out_axis) {
+    GGML_ASSERT(out_axis >= -1 && out_axis < GGML_MAX_DIMS);
     std::lock_guard<std::mutex> lock(ggml_backend_meta_row_local_mutex());
-    ggml_backend_meta_row_local_ops().insert(op);
+    ggml_backend_meta_row_local_ops()[op] = out_axis;
 }
 
-static bool ggml_backend_meta_is_row_local(const ggml_tensor * tensor) {
+// True for a registered row-local op; *out_axis is its output's row axis.
+static bool ggml_backend_meta_is_row_local(const ggml_tensor * tensor, int * out_axis = nullptr) {
     if (tensor->op != GGML_OP_CUSTOM) {
         return false;
     }
     ggml_custom_op_params params;
     memcpy(&params, tensor->op_params, sizeof(params));
     std::lock_guard<std::mutex> lock(ggml_backend_meta_row_local_mutex());
-    return ggml_backend_meta_row_local_ops().count(params.userdata) != 0;
+    auto it = ggml_backend_meta_row_local_ops().find(params.userdata);
+    if (it == ggml_backend_meta_row_local_ops().end()) {
+        return false;
+    }
+    if (out_axis != nullptr) {
+        *out_axis = it->second < 0 ? ggml_n_dims(tensor) - 1 : it->second;
+    }
+    return true;
 }
 
 const char * ggml_backend_meta_split_axis_name(enum ggml_backend_meta_split_axis split_axis) {
@@ -932,10 +942,11 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
     };
 
-    // Row-local custom ops (ggml_backend_meta_register_row_local_op): split along the output's outermost axis when an
-    // input is; ratios follow the first split input (checked for the others below the switch).
+    // Row-local custom ops (ggml_backend_meta_register_row_local_op): split along the output's row axis when an input
+    // is; ratios follow the first split input (checked for the others below the switch).
     auto handle_row_local = [&](const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
-        const int axis = ggml_n_dims(tensor) - 1;
+        int axis = ggml_n_dims(tensor) - 1;
+        ggml_backend_meta_is_row_local(tensor, &axis);
         bool any_split = false;
         for (size_t i = 0; i < GGML_MAX_SRC; i++) {
             if (tensor->src[i] == nullptr || tensor->src[i] == tensor) {
