@@ -2261,6 +2261,24 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                     continue;
                 }
                 bcj.nodes[i] = ggml_backend_meta_buffer_simple_tensor(node, j);
+                if (!bcj.nodes[i]) {
+                    const auto * buf_ctx = static_cast<const ggml_backend_meta_buffer_context *>(node->buffer->context);
+                    GGML_LOG_ERROR("%s: missing simple tensor: device=%zu node=%d name='%s' op=%s "
+                                   "view='%s' static=%zu compute[%d]=%zu next[%d]=%zu\n",
+                                   __func__, j, i, node->name, ggml_op_name(node->op),
+                                   node->view_src ? node->view_src->name : "",
+                                   buf_ctx->stc_static.simple_tensors.size(),
+                                   buf_ctx->stc_compute_index,
+                                   buf_ctx->stc_compute[buf_ctx->stc_compute_index].simple_tensors.size(),
+                                   buf_ctx->stc_compute_index_next,
+                                   buf_ctx->stc_compute[buf_ctx->stc_compute_index_next].simple_tensors.size());
+                    for (int s = 0; s < GGML_MAX_SRC; ++s) {
+                        if (node->src[s]) {
+                            GGML_LOG_ERROR("  src[%d]='%s' op=%s buffer=%p\n", s, node->src[s]->name,
+                                           ggml_op_name(node->src[s]->op), (void *) node->src[s]->buffer);
+                        }
+                    }
+                }
                 GGML_ASSERT(bcj.nodes[i]);
             }
         }
