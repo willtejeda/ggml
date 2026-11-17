@@ -497,6 +497,12 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
         }
     }
 
+    size_t clear_cache() override {
+        const size_t before = pool_size;
+        clear_pool();
+        return before - pool_size;
+    }
+
     void * alloc(size_t size, size_t * actual_size) override {
 #ifdef DEBUG_CUDA_MALLOC
         int nnz = 0;
@@ -600,17 +606,29 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
     }
 
     ~ggml_cuda_pool_vmm() {
-        if (pool_addr != 0) {
-#if defined(GGML_USE_HIP)
-            // Workaround for https://github.com/ROCm/ROCR-Runtime/issues/285
-            for (std::pair<CUdeviceptr, size_t> & mapping : mappings) {
-                CU_CHECK(cuMemUnmap(mapping.first, mapping.second));
-            }
-#else
-            CU_CHECK(cuMemUnmap(pool_addr, pool_size));
-#endif
-            CU_CHECK(cuMemAddressFree(pool_addr, CUDA_POOL_VMM_MAX_SIZE));
+        GGML_ASSERT(pool_used == 0);
+        clear_cache();
+    }
+
+    size_t clear_cache() override {
+        if (pool_used != 0 || pool_addr == 0) {
+            return 0;
         }
+        ggml_cuda_set_device(device);
+        const size_t released = pool_size;
+#if defined(GGML_USE_HIP)
+        // Workaround for https://github.com/ROCm/ROCR-Runtime/issues/285
+        for (std::pair<CUdeviceptr, size_t> & mapping : mappings) {
+            CU_CHECK(cuMemUnmap(mapping.first, mapping.second));
+        }
+        mappings.clear();
+#else
+        CU_CHECK(cuMemUnmap(pool_addr, pool_size));
+#endif
+        CU_CHECK(cuMemAddressFree(pool_addr, CUDA_POOL_VMM_MAX_SIZE));
+        pool_addr = 0;
+        pool_size = 0;
+        return released;
     }
 
     void * alloc(size_t size, size_t * actual_size) override {
@@ -2892,6 +2910,35 @@ void ggml_backend_cuda_set_buffer_cache_enabled(ggml_backend_t backend, bool ena
 void ggml_backend_cuda_clear_buffer_cache(ggml_backend_t backend) {
     GGML_ASSERT(ggml_backend_is_cuda(backend));
     auto * ctx = (ggml_backend_cuda_context *) backend->context;
+    // The caller must serialize submissions. Returned operation scratch can
+    // still be in flight on any fork/join stream, not just the current stream.
+    for (int device = 0; device < GGML_CUDA_MAX_DEVICES; ++device) {
+        for (int stream = 0; stream < GGML_CUDA_MAX_STREAMS; ++stream) {
+            if (ctx->streams[device][stream] != nullptr) {
+                ggml_cuda_set_device(device);
+                CUDA_CHECK(cudaStreamSynchronize(ctx->streams[device][stream]));
+            }
+        }
+    }
+#ifdef USE_CUDA_GRAPH
+    // Captures embed scratch addresses. External executors invalidate lazily
+    // against this generation before their next replay.
+    ctx->cuda_graphs.clear();
+    ++ctx->scratch_cache_generation;
+#endif
+    for (int device = 0; device < GGML_CUDA_MAX_DEVICES; ++device) {
+        size_t released = 0;
+        for (auto & pool : ctx->pools[device]) {
+            if (pool) {
+                released += pool->clear_cache();
+            }
+        }
+        if (released != 0) {
+            GGML_LOG_INFO("CUDA%d: released %.2f MiB idle operation scratch\n",
+                          device, released / 1024.0 / 1024.0);
+        }
+    }
+    ggml_cuda_set_device(ctx->device);
     ggml_cuda_clear_reusable_buffers(ctx->device);
 }
 
@@ -5100,6 +5147,7 @@ struct ggml_cuda_ext_graph {
     bool checked = false;
     bool compatible = false;
     bool warmed = false;
+    uint64_t scratch_cache_generation = 0;
 
     void reset() {
         if (instance) {
@@ -5156,8 +5204,9 @@ static ggml_status ggml_cuda_ext_graph_compute(void * opaque, ggml_cgraph * grap
     // A plan freezes metadata, but scheduler allocations and externally bound
     // tensor addresses can change without changing the ggml graph UID.
     const bool first_execution = state.addresses.empty();
-    bool changed = state.stream != stream;
+    bool changed = state.stream != stream || state.scratch_cache_generation != ctx->scratch_cache_generation;
     state.stream = stream;
+    state.scratch_cache_generation = ctx->scratch_cache_generation;
     std::vector<const void *> addresses;
     addresses.reserve(graph->n_nodes * (GGML_MAX_SRC + 1));
     for (int i = 0; i < graph->n_nodes; ++i) {

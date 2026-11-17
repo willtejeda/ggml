@@ -1210,6 +1210,8 @@ struct ggml_cuda_pool {
 
     virtual void * alloc(size_t size, size_t * actual_size) = 0;
     virtual void free(void * ptr, size_t size) = 0;
+    // Called only after backend work is quiescent; preserve outstanding borrowers.
+    virtual size_t clear_cache() = 0;
 };
 
 template<typename T>
@@ -1474,6 +1476,7 @@ struct ggml_backend_cuda_context {
     std::unordered_map<const void *, std::unique_ptr<ggml_cuda_graph>> cuda_graphs;
 
     int64_t last_graph_eviction_sweep = 0;
+    uint64_t scratch_cache_generation = 0;
 
     ggml_cuda_graph * cuda_graph(const void * first_node_ptr) {
         const int64_t time_now = ggml_time_us();

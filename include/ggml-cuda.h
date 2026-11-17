@@ -31,7 +31,9 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int de
 // Disabled by default. Disabling also frees idle blocks; active buffers remain valid.
 // GGML_CUDA_REUSE_BUFFERS=0 and unified memory prevent enabling the cache.
 GGML_BACKEND_API void ggml_backend_cuda_set_buffer_cache_enabled(ggml_backend_t backend, bool enabled);
-// Frees only idle cached blocks, without changing whether caching is enabled.
+// Synchronizes backend streams and frees idle buffers and operation scratch;
+// live allocations remain valid. Caller must serialize backend submissions.
+// Invalidates CUDA captures whose scratch addresses may be reclaimed.
 GGML_BACKEND_API void ggml_backend_cuda_clear_buffer_cache(ggml_backend_t backend);
 
 // conduct allreduce operation between devices
